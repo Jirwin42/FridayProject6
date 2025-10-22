@@ -13,7 +13,7 @@ load_dotenv()
 
 # --- !! NEW TEST SETTING !! ---
 # Set to None to process all reviews, or a number to limit for testing.
-LIMIT_REVIEWS = 10 
+LIMIT_REVIEWS = 10
 
 # Initialize the OpenAI client
 # It will automatically look for the OPENAI_API_KEY environment variable
