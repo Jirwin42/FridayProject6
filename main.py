@@ -6,6 +6,12 @@ from openai import OpenAI
 from dotenv import load_dotenv
 import matplotlib.pyplot as plt
 
+# --- NEW IMPORTS FOR GUI ---
+import tkinter as tk
+from tkinter import ttk, scrolledtext
+from PIL import Image, ImageTk
+# ---------------------------
+
 # --- Setup ---
 
 # Load environment variables (specifically OPENAI_API_KEY) from .env file
@@ -13,7 +19,7 @@ load_dotenv()
 
 # --- !! NEW TEST SETTING !! ---
 # Set to None to process all reviews, or a number to limit for testing.
-LIMIT_REVIEWS = 10
+LIMIT_REVIEWS = None
 
 # Initialize the OpenAI client
 # It will automatically look for the OPENAI_API_KEY environment variable
@@ -174,7 +180,6 @@ def get_main_topic_fallback(review_text: str) -> str | None:
         print(f"Error in get_main_topic_fallback: {e}")
         return None
 
-# --- !! NEW FUNCTION !! ---
 # --- Function 4: Summarize and Structure Data ---
 
 def summarize_data(final_analyzed_data: list) -> (dict, str):
@@ -257,7 +262,6 @@ def summarize_data(final_analyzed_data: list) -> (dict, str):
     
     return summary_data, summary_text
 
-# --- !! NEW FUNCTION !! ---
 # --- Function 5: Create Visualizations ---
 
 def create_visualizations(summary_data: dict, file_prefix: str):
@@ -358,22 +362,27 @@ def create_visualizations(summary_data: dict, file_prefix: str):
         print(f"Error creating aspect sentiment breakdown: {e}")
 
 
-# --- !! NEW FUNCTION !! ---
+# --- !! UPDATED FUNCTION !! ---
 # --- Function 6: Get AI Recommendations ---
 
-def get_recommendations(summary_text: str):
+def get_recommendations(summary_text: str, file_prefix: str) -> (str | None, str | None):
     """
     Uses the AI to generate actionable recommendations based on the summary.
+    Saves the recommendations to a .md file.
     
     Args:
         summary_text: The human-readable summary from summarize_data().
+        file_prefix: The prefix for saving the file.
+
+    Returns:
+        A tuple of (recommendations_text, recommendations_filename) or (None, None)
     """
     print("\n--- Generating AI Recommendations ---")
     
-    # Handle case where summary might be empty (e.g., test run with 0 results)
+    # Handle case where summary might be empty
     if "---" not in summary_text or "No reviews processed" in summary_text:
          print("Summary text is empty or contains no data. Skipping AI recommendations.")
-         return
+         return None, None
          
     system_prompt = (
         "You are a Senior Product Manager at Apple, an expert in product strategy "
@@ -405,9 +414,96 @@ def get_recommendations(summary_text: str):
         recommendations = response.choices[0].message.content
         print(recommendations)
         
+        # --- NEW: Save recommendations to file ---
+        rec_filename = f"{file_prefix}_recommendations.md"
+        with open(rec_filename, "w", encoding="utf-8") as f:
+            f.write(recommendations)
+        print(f"\nRecommendations saved to: {rec_filename}")
+        # ------------------------------------------
+        
+        return recommendations, rec_filename
+        
     except Exception as e:
         print(f"Error in get_recommendations: {e}")
-        return None
+        return None, None
+
+# --- !! NEW FUNCTION !! ---
+# --- Function 7: Launch GUI Dashboard ---
+
+def launch_results_gui(file_prefix: str, rec_filename: str):
+    """
+    Launches a Tkinter GUI to display the results.
+
+    Args:
+        file_prefix: The prefix of the saved .png files.
+        rec_filename: The exact path to the recommendations .md file.
+    """
+    
+    # Define file paths
+    img_files = {
+        "Sentiment Distribution": f"{file_prefix}_sentiment_distribution.png",
+        "Aspect Frequency": f"{file_prefix}_aspect_frequency.png",
+        "Aspect Sentiment": f"{file_prefix}_aspect_sentiment_breakdown.png"
+    }
+
+    # --- Create the main window ---
+    root = tk.Tk()
+    root.title(f"Analysis Results Dashboard ({file_prefix})")
+    root.geometry("900x700") # Set a good default size
+
+    # Create the Tabbed Notebook
+    tab_control = ttk.Notebook(root)
+    
+    # --- Tab 1: Recommendations ---
+    tab_rec = ttk.Frame(tab_control)
+    tab_control.add(tab_rec, text='Recommendations')
+    
+    # Add a scrolled text widget
+    txt_widget = scrolledtext.ScrolledText(tab_rec, wrap=tk.WORD, width=100, height=40, font=("Arial", 10))
+    try:
+        with open(rec_filename, "r", encoding="utf-8") as f:
+            recommendations_text = f.read()
+        txt_widget.insert(tk.INSERT, recommendations_text)
+    except Exception as e:
+        txt_widget.insert(tk.INSERT, f"Error: Could not load recommendations file.\n{e}")
+    
+    txt_widget.config(state="disabled") # Make it read-only
+    txt_widget.pack(expand=True, fill="both", padx=10, pady=10)
+
+    # --- Helper function to create image tabs ---
+    def create_image_tab(tab_name, img_filename):
+        tab = ttk.Frame(tab_control)
+        tab_control.add(tab, text=tab_name)
+        
+        try:
+            # Open the image with Pillow
+            img_original = Image.open(img_filename)
+            
+            # Resize image to fit window (e.g., max 850x650) while maintaining aspect ratio
+            img_original.thumbnail((850, 650), Image.Resampling.LANCZOS)
+            
+            # Convert to PhotoImage
+            img_tk = ImageTk.PhotoImage(img_original)
+            
+            # Create a label to hold the image
+            label = tk.Label(tab, image=img_tk)
+            label.image = img_tk # CRITICAL: Keep a reference to avoid garbage collection
+            label.pack(padx=10, pady=10, expand=True)
+            
+        except Exception as e:
+            err_label = tk.Label(tab, text=f"Could not load image: {img_filename}\n{e}", font=("Arial", 12), fg="red")
+            err_label.pack(padx=10, pady=10, expand=True)
+
+    # --- Tabs 2, 3, 4: Graphs ---
+    for tab_name, img_file in img_files.items():
+        create_image_tab(tab_name, img_file)
+
+    # Pack the tab control to make it visible
+    tab_control.pack(expand=1, fill="both")
+    
+    # Start the GUI event loop
+    root.mainloop()
+
 
 # --- Main Execution (Updated) ---
 
@@ -424,6 +520,7 @@ def analyze_all_reviews():
     8. Summarize results.
     9. Create visualizations.
     10. Get AI-driven recommendations.
+    11. !! NEW !! Launch GUI Dashboard.
     """
     
     print(f"Connecting to database: {DB_FILE}")
@@ -535,8 +632,18 @@ def analyze_all_reviews():
     print("---------------------------------\n")
 
     # 4. Get AI Recommendations
-    get_recommendations(summary_text)
+    #    This function now returns the filename
+    _recommendations_text, recommendations_file = get_recommendations(summary_text, file_prefix)
+    
     print("\n=== SCRIPT FINISHED ===")
+
+    # 5. --- NEW: Launch GUI ---
+    if recommendations_file:
+        print(f"Launching results dashboard...")
+        # This will pause the script and open the new window
+        launch_results_gui(file_prefix, recommendations_file)
+    else:
+        print("Skipping GUI launch as recommendations failed or were skipped.")
 
 
 if __name__ == "__main__":
