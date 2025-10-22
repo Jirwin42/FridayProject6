@@ -9,6 +9,10 @@ from dotenv import load_dotenv
 # Load environment variables (specifically OPENAI_API_KEY) from .env file
 load_dotenv()
 
+# --- !! NEW TEST SETTING !! ---
+# Set to None to process all reviews, or a number to limit for testing.
+LIMIT_REVIEWS = 10 
+
 # Initialize the OpenAI client
 # It will automatically look for the OPENAI_API_KEY environment variable
 try:
@@ -57,10 +61,11 @@ def get_sentiment(review_text: str) -> str:
             temperature=0, # Low temperature for classification tasks
             max_tokens=10
         )
-        sentiment = response.choices[0].message.content.strip()
+        sentiment = response.choices[0].message.content.strip().replace("\"", "")
         
         # Simple validation to ensure it's one of the expected words
         if sentiment not in ['Positive', 'Negative', 'Neutral']:
+            print(f"Warning: Unexpected sentiment '{sentiment}', defaulting to Neutral.")
             return 'Neutral' # Default fallback
             
         return sentiment
@@ -69,7 +74,7 @@ def get_sentiment(review_text: str) -> str:
         print(f"Error in get_sentiment: {e}")
         return "Error"
 
-# --- Function 2: Aspect Extraction ---
+# --- Function 2: Aspect Extraction (Primary) ---
 
 def extract_aspects(review_text: str) -> list:
     """
@@ -105,11 +110,6 @@ def extract_aspects(review_text: str) -> list:
             temperature=0
         )
         
-        # The response.choices[0].message.content is a JSON string.
-        # We parse it into a Python object.
-        # The prompt guides it to be a list, but the JSON object mode
-        # might wrap it in a root key. Let's try to parse it flexibly.
-        
         result_str = response.choices[0].message.content
         result_data = json.loads(result_str)
         
@@ -122,7 +122,6 @@ def extract_aspects(review_text: str) -> list:
             if isinstance(result_data[key], list):
                 return result_data[key]
         
-        # If we reach here, the format is unexpected
         print(f"Unexpected JSON format from extract_aspects: {result_str}")
         return []
 
@@ -130,18 +129,63 @@ def extract_aspects(review_text: str) -> list:
         print(f"Error in extract_aspects: {e}")
         return []
 
-# --- Main Execution ---
+# --- !! NEW FUNCTION !! ---
+# --- Function 3: Aspect Extraction (Fallback) ---
+
+def get_main_topic_fallback(review_text: str) -> str | None:
+    """
+    Fallback function to get the single main topic of a review if
+    JSON extraction fails.
+
+    Args:
+        review_text: The text of the review.
+
+    Returns:
+        A string (e.g., "Battery", "Comfort") or None if no topic is found.
+    """
+    system_prompt = (
+        "What is the single main product feature or topic this review is about? "
+        "Examples: 'Battery', 'Comfort', 'Price', 'Software', 'Passthrough', 'Games'. "
+        "Respond with *only* the topic name. "
+        "If the review is too general and has no specific topic, respond with 'General'."
+    )
+    try:
+        response = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": review_text}
+            ],
+            temperature=0,
+            max_tokens=15 # Enough for 'Mac Virtual Display'
+        )
+        topic = response.choices[0].message.content.strip().replace("\"", "")
+        
+        if not topic or len(topic) > 50: # Basic sanity check
+            return None
+        # Don't log "General" as a specific aspect
+        if topic.lower() in ['general', 'general feedback', 'none']:
+            return None
+            
+        return topic
+        
+    except Exception as e:
+        print(f"Error in get_main_topic_fallback: {e}")
+        return None
+
+# --- Main Execution (Updated) ---
 
 def analyze_all_reviews():
     """
     Main function to:
     1. Connect to the SQLite database.
-    2. Fetch all reviews.
+    2. Fetch reviews (respecting the LIMIT).
     3. Loop through each review.
     4. Perform sentiment analysis.
-    5. Perform aspect extraction.
-    6. Combine and tag the data.
-    7. Print the final results.
+    5. Perform primary aspect extraction.
+    6. Run fallback extraction if primary fails.
+    7. Combine and tag the data.
+    8. Print the final results.
     """
     
     print(f"Connecting to database: {DB_FILE}")
@@ -149,8 +193,14 @@ def analyze_all_reviews():
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
         
-        # Fetch all reviews from the 'reviews' table
-        cursor.execute("SELECT id, review_text FROM reviews")
+        # Fetch reviews from the 'reviews' table
+        if LIMIT_REVIEWS:
+            print(f"--- RUNNING IN TEST MODE: Processing only {LIMIT_REVIEWS} reviews. ---")
+            cursor.execute("SELECT id, review_text FROM reviews LIMIT ?", (LIMIT_REVIEWS,))
+        else:
+            print("--- RUNNING IN PRODUCTION MODE: Processing all reviews. ---")
+            cursor.execute("SELECT id, review_text FROM reviews")
+            
         all_reviews = cursor.fetchall()
         
     except sqlite3.Error as e:
@@ -177,17 +227,36 @@ def analyze_all_reviews():
         sentiment = get_sentiment(review_text)
         print(f"Overall Sentiment: {sentiment}")
         
-        # 2. Extract aspects
-        aspects = extract_aspects(review_text)
-        print(f"Extracted Aspects: {aspects}")
+        # 2. Try Primary Aspect Extraction
+        aspects = extract_aspects(review_text) # This is a list
         
         # 3. Clean, process, and tag
         processed_aspects = []
-        if aspects: # Only loop if aspects were found
+        
+        # --- !! UPDATED LOGIC !! ---
+        if not aspects: # Check if the list is empty
+            print("Primary JSON extraction empty. Trying fallback...")
+            main_topic = get_main_topic_fallback(review_text)
+            
+            if main_topic:
+                print(f"Fallback found main topic: {main_topic}")
+                # Format this topic to match the standard data structure
+                processed_aspects = [
+                    {
+                        "aspect": main_topic,
+                        "quote": "N/A (Found by fallback)", # Placeholder quote
+                        "tagged_sentiment": sentiment # Use the overall sentiment
+                    }
+                ]
+            else:
+                print("Fallback also found no specific topic.")
+                # processed_aspects remains an empty list []
+                
+        else: # Primary extraction SUCCEEDED
+            print(f"Extracted Aspects (JSON): {aspects}")
             for aspect_item in aspects:
                 # Ensure the aspect_item has the expected keys
                 if 'aspect' in aspect_item and 'quote' in aspect_item:
-                    # Tag the aspect with the *overall* review sentiment
                     tagged_aspect = {
                         "aspect": aspect_item['aspect'],
                         "quote": aspect_item['quote'],
@@ -214,10 +283,15 @@ def analyze_all_reviews():
     print(json.dumps(final_analyzed_data, indent=2))
     
     # Optionally, save to a file
-    with open("analysis_results.json", "w") as f:
+    output_filename = "analysis_results.json"
+    if LIMIT_REVIEWS:
+        output_filename = f"analysis_results_TEST_LIMIT_{LIMIT_REVIEWS}.json"
+        
+    with open(output_filename, "w") as f:
         json.dump(final_analyzed_data, f, indent=2)
-    print("\nResults also saved to 'analysis_results.json'")
+    print(f"\nResults also saved to '{output_filename}'")
 
 
 if __name__ == "__main__":
     analyze_all_reviews()
+
